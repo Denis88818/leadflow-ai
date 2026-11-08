@@ -109,7 +109,7 @@ n8n · OpenAI API · HubSpot CRM API · Slack · Google Sheets · Cloudflare Wor
 
 ## Author
 
-Built by **Denis Danchenko** — AI automation and CRM developer (n8n, HubSpot, AI agents, web apps).
+Built by **Denis Danchenko** — AI automation and CRM developer (n8n, HubSpot, AI workflows, web apps).
 Available for projects on [Upwork](https://www.upwork.com/freelancers/~016707bca373f53f65).
 
 ## License
