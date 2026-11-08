@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json.schemastore.org/wrangler.json",
+  "name": "leadflow-ai",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-30",
+  "vars": {
+    // Your n8n production webhook (Webhook node → Production URL)
+    "N8N_WEBHOOK_URL": "https://n8n.example.com/webhook/lead-intake",
+    // Comma-separated allowlists the Worker checks before forwarding
+    "N8N_ALLOWED_HOSTS": "n8n.example.com",
+    "N8N_ALLOWED_PATHS": "/webhook/lead-intake"
+  },
+  // Secret, never committed: `npx wrangler secret put N8N_WEBHOOK_KEY`
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  }
+}

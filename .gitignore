@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Cloudflare / Wrangler local state
+.wrangler/
+.dev.vars
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# OS / editor files
+.DS_Store
+.vscode/
+.idea/
+*.log
+
+# Build / coverage output
+coverage/
+dist/
+
+# Local-only files
+.tmp/

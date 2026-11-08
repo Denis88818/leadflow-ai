@@ -1,0 +1,671 @@
+{
+  "name": "Lead Intake — AI Qualification → HubSpot → Slack — Portfolio v2.5",
+  "nodes": [
+    {
+      "id": "b2f95fe2-14f2-4116-ac5b-7a700a9d139b",
+      "name": "README",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        -520
+      ],
+      "parameters": {
+        "width": 620,
+        "height": 520,
+        "color": 5,
+        "content": "## AI Lead Qualification → HubSpot → Slack — Portfolio v2.5\n\n**Flow:** Webhook → 202 ACK → Technical input validation → Duplicate check → OpenAI AI Qualification → AI qualification gate → deterministic priority score → Hot/Warm/Cold → HubSpot → Slack → Google Sheets audit log.\n\n### Public intake\nThe website collects only:\n- name\n- email\n- phone\n- company\n- one free-form business request\n- consent\n\nThe visitor never selects a qualification result, budget band, urgency, timeline, score or lead class.\n\n### AI qualification gate\nOpenAI reads the unstructured request and decides whether enough business evidence is present.\n\nCore evidence:\n1. clear requirement / product or service requested;\n2. explicit budget or budget range;\n3. explicit intended timing / start / usage window.\n\nWhen a core item is missing, contradictory or too vague, AI returns `qualification_status=invalid`, lists `missing_information`, and explains `qualification_reason`.\n\nThe AI must never invent missing information.\n\n### Priority score\nOnly AI-qualified leads are scored.\n\n- service/requirement fit × 3 = 30\n- buying intent × 2 = 20\n- budget signal = 25\n- timing/urgency = 25\n- total = 100\n\nThresholds:\n- Hot >= 70\n- Warm 40–69\n- Cold < 40\n\nThese are internal workflow outputs and are never displayed by the public website.\n\n### AI output\n`qualification_status`, `requirement`, `product_requested`, `budget_signal`, `urgency`, `fit`, `intent`, `pain_points`, `next_action`, `summary`, `missing_information`, `qualification_reason`.\n\n### Technical vs AI invalid\nTechnical validation only handles transport/contact/security issues such as malformed email, missing name, missing message, invalid phone, spam honeypot or missing consent.\n\nBusiness qualification is handled by AI. A lead can therefore pass technical validation and still become AI-invalid because the request does not contain enough budget, timing or requirement evidence.\n\n### Security / privacy\nThe public site goes through the same-origin Cloudflare Worker. The n8n API key stays server-side. The browser receives only a generic HTTP acknowledgement and never receives n8n, OpenAI, HubSpot or Slack payloads.\n\nThe LLM receives business context only (company, source, message), not name/email/phone.\n\n### Test / production\nKeep the public website URL unchanged. Switch only the Cloudflare `N8N_WEBHOOK_URL` between:\n- staging: `https://n8n.example.com/webhook/lead-intake-staging`\n- production: `https://n8n.example.com/webhook/lead-intake`\n\nThe staging path is a permanent webhook and is used for repeated portfolio testing. The `webhook-test` URL remains only for short-lived node debugging.\n"
+      }
+    },
+    {
+      "id": "628cbbd4-1867-4d0e-a0fe-587efca9eed4",
+      "name": "Webhook: New Lead",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "929d9a63-380a-43a2-943c-ba3eeed4bad6",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {},
+        "responseCode": 202
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ME",
+          "name": "Lead Webhook Auth"
+        }
+      }
+    },
+    {
+      "id": "4eab8af8-3e10-4aa9-8f7c-bd274ced67d0",
+      "name": "Respond: 202 Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        220,
+        -160
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'accepted', processing: 'async' } }}",
+        "options": {
+          "responseCode": 202
+        }
+      }
+    },
+    {
+      "id": "7fb61444-9177-4db8-a65a-2cd936afce29",
+      "name": "Validate & Clean",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Technical validation only. AI owns business/lead qualification.\nconst raw = $json.body ?? $json;\nconst str = v => (v === undefined || v === null) ? '' : String(v).trim().replace(/\\s+/g, ' ');\nconst errors = [];\n\nconst name = str(raw.name).slice(0, 120);\nconst email = str(raw.email).toLowerCase().slice(0, 254);\nconst company = str(raw.company).slice(0, 160);\nconst source = str(raw.source).slice(0, 80) || 'webform';\nconst message = str(raw.message).slice(0, 2000);\nconst honeypot = str(raw.website);\nconst consent = raw.consent === true || raw.consent === 'true';\n\nlet phone = str(raw.phone).replace(/[^\\d+]/g, '');\nif (phone.startsWith('00')) phone = '+' + phone.slice(2);\nconst phoneDigits = phone.replace(/\\D/g, '');\nif (phone && (phoneDigits.length < 8 || phoneDigits.length > 15)) {\n  errors.push('invalid_phone');\n  phone = '';\n}\n\nif (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/.test(email)) errors.push('invalid_email');\nif (!name) errors.push('missing_name');\nif (!message) errors.push('missing_message');\nif (honeypot) errors.push('spam_honeypot');\nif (!consent) errors.push('consent_required');\n\nlet h = 5381;\nfor (const c of email + '|' + phoneDigits + '|' + message) h = ((h << 5) + h + c.charCodeAt(0)) >>> 0;\n\nconst valid = errors.length === 0;\nreturn [{ json: {\n  valid,\n  status: valid ? 'new' : 'invalid',\n  errors,\n  received_at: new Date().toISOString(),\n  idempotency_key: 'L' + h.toString(36),\n  name, email, phone, phone_digits: phoneDigits,\n  company, source, message, consent\n}}];"
+      }
+    },
+    {
+      "id": "f7d123dd-4dad-45b4-928e-773e8e52a736",
+      "name": "IF: Valid Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "853ef444-e6b3-4457-b921-8f47da2598b0",
+              "leftValue": "={{ $json.valid }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "cf8687d2-eeaf-4fcc-b7bd-4635370401bc",
+      "name": "Sheets: Find Previous Leads",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        660,
+        0
+      ],
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "PASTE_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets (demo)"
+        }
+      },
+      "notes": ""
+    },
+    {
+      "id": "18baf8f5-751f-40b1-8a6b-a06031c9958a",
+      "name": "Check Duplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Duplicate = same email OR same normalized phone processed in the last 24h.\n// For this portfolio demo the audit log is read as a small dataset. For high-volume production,\n// move this lookup to PostgreSQL/CRM search rather than scanning the whole Sheet.\nconst lead = $('Validate & Clean').first().json;\nconst WINDOW_MS = 24 * 60 * 60 * 1000;\nconst now = Date.now();\nconst normalizeEmail = v => String(v ?? '').trim().toLowerCase();\nconst normalizePhone = v => String(v ?? '').replace(/\\D/g, '');\nconst rows = $input.all().map(i => i.json).filter(r => r && (r.email || r.phone));\n\nconst recent = rows.find(r => {\n  const received = Date.parse(r.received_at);\n  const withinWindow = Number.isFinite(received) && now - received >= 0 && now - received < WINDOW_MS;\n  if (!withinWindow) return false;\n\n  const sameEmail = Boolean(lead.email) && normalizeEmail(r.email) === lead.email;\n  const samePhone = Boolean(lead.phone_digits) && normalizePhone(r.phone) === lead.phone_digits;\n  const processed = ['qualified', 'fallback'].includes(String(r.status || '').toLowerCase());\n  return processed && (sameEmail || samePhone);\n});\n\nreturn [{ json: {\n  ...lead,\n  is_duplicate: Boolean(recent),\n  status: recent ? 'duplicate' : 'new',\n  duplicate_of: recent ? (recent.idempotency_key || '') : '',\n  duplicate_match: recent\n    ? (normalizeEmail(recent.email) === lead.email ? 'email' : 'phone')\n    : ''\n}}];"
+      }
+    },
+    {
+      "id": "35130671-1030-40a6-aecd-31e02bbb5183",
+      "name": "IF: Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1100,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e6684194-56b5-4fca-acee-eb7c3457a76d",
+              "leftValue": "={{ $json.is_duplicate }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "d12a32ef-cb2f-4261-b526-2e0520995ec5",
+      "name": "Build AI Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        -100
+      ],
+      "parameters": {
+        "jsCode": "// Build an AI qualification request from the lead's unstructured business context.\n// The AI is responsible for deciding whether the lead has enough information to qualify.\nconst MODEL = 'gpt-4o-mini';\nconst lead = $json;\n\nconst schema = {\n  type: 'object',\n  additionalProperties: false,\n  properties: {\n    qualification_status: {\n      type: 'string',\n      enum: ['qualified', 'invalid'],\n      description: 'qualified only when the core business signals required by this portfolio are present and usable; otherwise invalid'\n    },\n    requirement: {\n      type: 'string',\n      description: 'The customer requirement or business problem, grounded in the message'\n    },\n    product_requested: {\n      type: 'string',\n      description: 'The product or service requested, grounded in the message'\n    },\n    budget_signal: {\n      type: 'string',\n      enum: ['none', 'low', 'mid', 'high'],\n      description: 'none only when no usable budget information is stated'\n    },\n    urgency: {\n      type: 'string',\n      enum: ['low', 'medium', 'high'],\n      description: 'Derived strictly from the intended usage/start timing stated by the lead'\n    },\n    fit: {\n      type: 'integer',\n      description: '0-10, how well the request matches the automation agency services'\n    },\n    intent: {\n      type: 'integer',\n      description: '0-10, explicit buying/implementation intent from the message'\n    },\n    pain_points: {\n      type: 'array',\n      items: { type: 'string' }\n    },\n    next_action: {\n      type: 'string',\n      description: 'One concrete sales action supported by the evidence'\n    },\n    summary: {\n      type: 'string'\n    },\n    missing_information: {\n      type: 'array',\n      items: { type: 'string' },\n      description: 'Required business information that is absent or unusable'\n    },\n    qualification_reason: {\n      type: 'string',\n      description: 'Why the lead is qualified or invalid, based only on evidence in the request'\n    }\n  },\n  required: [\n    'qualification_status',\n    'requirement',\n    'product_requested',\n    'budget_signal',\n    'urgency',\n    'fit',\n    'intent',\n    'pain_points',\n    'next_action',\n    'summary',\n    'missing_information',\n    'qualification_reason'\n  ]\n};\n\nconst system = [\n  'You qualify inbound B2B leads for an automation agency (n8n, AI, CRM integrations).',\n  'Treat the lead message as unstructured input. Do not assume the visitor selected or knows any qualification category.',\n  'Extract facts only from the supplied business context. Never invent budget, timing, requirements, pain points, or buying signals.',\n  'For this portfolio qualification gate, the core evidence is: (1) a clear product/service or business requirement, (2) explicit budget information or budget range, and (3) explicit intended timing/start/usage window.',\n  'Set qualification_status=invalid when any core evidence is missing, contradictory, or too vague to use. Put the missing items into missing_information. Do not make an invalid lead look qualified by guessing.',\n  'budget_signal: low < 1000 EUR, mid = 1000-5000 EUR, high > 5000 EUR; none = not stated or not usable.',\n  'urgency: high = explicit deadline, immediate need or use/start this month; medium = this quarter / within about 90 days; low = later but still a stated plan. If no usable timing is stated, qualification_status must be invalid.',\n  'fit and intent are 0-10. Fit measures service match; intent measures explicit willingness/readiness to implement or buy. Do not infer either from personal data.',\n  'If the message is in French or English, answer in English.',\n  'next_action must be concrete and evidence-based. qualification_reason must briefly explain the decision.',\n  'For invalid leads, keep fit and intent at 0, use budget_signal=none or the extracted signal, and use urgency=low only as a placeholder if timing is missing.'\n].join('\\n');\n\nconst user = JSON.stringify({\n  company: lead.company,\n  source: lead.source,\n  message: lead.message\n});\n\nreturn [{ json: {\n  lead,\n  body: {\n    model: MODEL,\n    temperature: 0,\n    messages: [\n      { role: 'system', content: system },\n      { role: 'user', content: user }\n    ],\n    response_format: {\n      type: 'json_schema',\n      json_schema: { name: 'lead_qualification', strict: true, schema }\n    }\n  }\n}}];"
+      }
+    },
+    {
+      "id": "dd83cc48-6df3-4ca8-9b88-8bd398176994",
+      "name": "OpenAI: Qualify Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        -100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_ME",
+          "name": "OpenAI (demo)"
+        }
+      }
+    },
+    {
+      "id": "c0091d6b-1160-4c42-8663-ea9f80394a81",
+      "name": "Parse AI & Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        -100
+      ],
+      "parameters": {
+        "jsCode": "// Parse AI JSON, validate it, apply the AI qualification gate, then compute a deterministic 0-100 score.\n// AI interprets the request; n8n rules own the final score/classification.\nconst lead = $('Build AI Request').first().json.lead;\nconst res = $json;\n\nconst W_FIT = 3;       // max 30 — description/service fit\nconst W_INTENT = 2;    // max 20 — explicit buying/implementation intent\nconst BUDGET_POINTS = { none: 0, low: 5, mid: 15, high: 25 }; // max 25 — explicit budget\nconst URGENCY_POINTS = { low: 5, medium: 15, high: 25 };       // max 25 — stated timing\nconst HOT = 70;\nconst WARM = 40;\n\nconst clamp = n => {\n  const value = Number(n);\n  return Number.isFinite(value) ? Math.max(0, Math.min(10, Math.round(value))) : 0;\n};\n\nlet ai = null;\nlet ai_status = 'ok';\nlet ai_error = '';\n\ntry {\n  if (res.error) throw new Error(typeof res.error === 'string' ? res.error : (res.error.message || JSON.stringify(res.error)));\n  const msg = res.choices?.[0]?.message;\n  if (!msg) throw new Error('empty_ai_response');\n  if (msg.refusal) throw new Error('ai_refusal: ' + msg.refusal);\n\n  ai = typeof msg.content === 'string' ? JSON.parse(msg.content) : msg.content;\n  if (!ai || typeof ai !== 'object') throw new Error('invalid_ai_object');\n  if (!['qualified','invalid'].includes(ai.qualification_status)) throw new Error('bad_qualification_status');\n  if (!(ai.budget_signal in BUDGET_POINTS)) throw new Error('bad_budget_signal');\n  if (!(ai.urgency in URGENCY_POINTS)) throw new Error('bad_urgency');\n  if (!Number.isInteger(ai.fit) || ai.fit < 0 || ai.fit > 10) throw new Error('bad_fit');\n  if (!Number.isInteger(ai.intent) || ai.intent < 0 || ai.intent > 10) throw new Error('bad_intent');\n  if (!Array.isArray(ai.pain_points) || !ai.pain_points.every(v => typeof v === 'string')) throw new Error('bad_pain_points');\n  if (!Array.isArray(ai.missing_information) || !ai.missing_information.every(v => typeof v === 'string')) throw new Error('bad_missing_information');\n  if (typeof ai.requirement !== 'string') throw new Error('bad_requirement');\n  if (typeof ai.product_requested !== 'string') throw new Error('bad_product_requested');\n  if (typeof ai.next_action !== 'string' || !ai.next_action) throw new Error('missing_next_action');\n  if (typeof ai.summary !== 'string' || !ai.summary) throw new Error('missing_summary');\n  if (typeof ai.qualification_reason !== 'string' || !ai.qualification_reason) throw new Error('missing_qualification_reason');\n\n  ai.pain_points = ai.pain_points.slice(0, 5).map(v => v.slice(0, 160));\n  ai.missing_information = ai.missing_information.slice(0, 5).map(v => v.slice(0, 120));\n  ai.requirement = ai.requirement.slice(0, 500);\n  ai.product_requested = ai.product_requested.slice(0, 200);\n  ai.next_action = ai.next_action.slice(0, 300);\n  ai.summary = ai.summary.slice(0, 500);\n  ai.qualification_reason = ai.qualification_reason.slice(0, 500);\n} catch (e) {\n  ai_status = 'fallback';\n  ai_error = String(e.message || e).slice(0, 300);\n  ai = null;\n}\n\nlet score = null;\nlet lead_class = ai ? 'Invalid' : 'Needs review';\n\nif (ai && ai.qualification_status === 'qualified') {\n  score = clamp(ai.fit) * W_FIT\n    + clamp(ai.intent) * W_INTENT\n    + BUDGET_POINTS[ai.budget_signal]\n    + URGENCY_POINTS[ai.urgency];\n  lead_class = score >= HOT ? 'Hot' : score >= WARM ? 'Warm' : 'Cold';\n}\n\nif (ai && ai.qualification_status === 'invalid') {\n  score = null;\n  lead_class = 'Invalid';\n}\n\nconst q = ai || {\n  qualification_status: 'invalid',\n  requirement: '',\n  product_requested: '',\n  budget_signal: 'none',\n  urgency: 'low',\n  fit: 0,\n  intent: 0,\n  pain_points: [],\n  next_action: 'Manual review: AI qualification failed',\n  summary: lead.message.slice(0, 300),\n  missing_information: ['AI qualification output unavailable'],\n  qualification_reason: 'AI qualification failed and the lead requires manual review'\n};\n\nconst [firstname, ...rest] = lead.name.split(' ');\nconst summaryText = [\n  q.summary,\n  q.requirement && `Requirement: ${q.requirement}`,\n  q.product_requested && `Product: ${q.product_requested}`,\n  q.pain_points?.length && `Pain points: ${q.pain_points.join('; ')}`,\n  q.qualification_reason && `Qualification: ${q.qualification_reason}`,\n  q.missing_information?.length && `Missing: ${q.missing_information.join('; ')}`\n].filter(Boolean).join('\\n');\n\nconst properties = {\n  email: lead.email,\n  firstname,\n  lastname: rest.join(' '),\n  company: lead.company,\n  hs_lead_status: lead_class === 'Hot' || lead_class === 'Warm' ? 'NEW' : 'UNQUALIFIED',\n  ai_lead_score: score ?? '',\n  ai_lead_class: ai_status === 'fallback' ? 'Needs review' : lead_class,\n  ai_budget_signal: q.budget_signal,\n  ai_urgency: q.urgency,\n  ai_next_action: q.next_action,\n  ai_summary: summaryText\n};\n\nif (lead.phone) properties.phone = lead.phone;\n\nreturn [{ json: {\n  ...lead,\n  status: ai_status === 'fallback' ? 'fallback' : (q.qualification_status === 'invalid' ? 'invalid' : 'qualified'),\n  ai_status,\n  ai_error,\n  qualification_status: ai_status === 'fallback' ? 'fallback' : q.qualification_status,\n  qualification_reason: q.qualification_reason,\n  missing_information: q.missing_information,\n  score,\n  lead_class,\n  requirement: q.requirement,\n  product_requested: q.product_requested,\n  budget_signal: q.budget_signal,\n  urgency: q.urgency,\n  pain_points: q.pain_points,\n  next_action: q.next_action,\n  summary: q.summary,\n  hubspot_body: { inputs: [ { idProperty: 'email', id: lead.email, properties } ] }\n}}];"
+      }
+    },
+    {
+      "id": "cf000207-1010-4ea3-a4ee-3eabe52c1bb0",
+      "name": "HubSpot: Upsert Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        -100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/batch/upsert",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.hubspot_body) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_ME",
+          "name": "HubSpot Private App"
+        }
+      }
+    },
+    {
+      "id": "19010c00-cee7-4515-bf3e-90a479cb6da4",
+      "name": "Merge CRM Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        -100
+      ],
+      "parameters": {
+        "jsCode": "// Combine scored lead with HubSpot result. CRM failure is logged, then raised to the Error workflow.\nconst HUBSPOT_PORTAL_ID = 'REPLACE_WITH_PORTAL_ID';\nconst base = { ...$('Parse AI & Score').first().json };\ndelete base.hubspot_body;\nconst r = $json;\nconst id = r.results?.[0]?.id || '';\nconst failed = Boolean(r.error) || !id;\nreturn [{ json: {\n  ...base,\n  hubspot_id: id,\n  hubspot_url: id ? `https://app.hubspot.com/contacts/${HUBSPOT_PORTAL_ID}/record/0-1/${id}` : '',\n  crm_status: failed ? 'failed' : 'ok',\n  crm_error: failed ? String(r.error?.message || r.error || 'no id in response').slice(0, 300) : ''\n}}];"
+      }
+    },
+    {
+      "id": "48b55742-1c99-4da3-827d-0ccaff984c54",
+      "name": "IF: Sales Notification?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2420,
+        -200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a6c9dd13-93cb-4d2d-8d8a-2bc2cc10d8f1",
+              "leftValue": "={{ $json.lead_class }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "rightValue": "Hot"
+            },
+            {
+              "id": "5b9b9cc2-4dcb-4562-a0bb-d00dd4c2d9c1",
+              "leftValue": "={{ $json.ai_status }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "rightValue": "fallback"
+            }
+          ],
+          "combinator": "or"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "155f22af-545f-4626-abae-faffd71b8db4",
+      "name": "Slack: Notify Sales",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        2640,
+        -300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "#sales-leads",
+          "mode": "name"
+        },
+        "text": "={{ $json.ai_status === 'fallback'\n  ? ':warning: *Lead needs manual qualification review*\\\\nAI qualification failed for ' + $json.name + ($json.company ? ' (' + $json.company + ')' : '') + '.\\\\nReason: ' + $json.ai_error\n  : ':fire: *Hot lead: ' + $json.name + ($json.company ? ' (' + $json.company + ')' : '') + '*\\\\nScore: ' + $json.score + '/100 | Budget: ' + $json.budget_signal + ' | Urgency: ' + $json.urgency + '\\\\nNeed: ' + $json.requirement + '\\\\nNext action: ' + $json.next_action + '\\\\n' + ($json.hubspot_url ? 'HubSpot: ' + $json.hubspot_url : ':warning: CRM sync failed — see alerts') }}",
+        "otherOptions": {}
+      },
+      "credentials": {
+        "slackApi": {
+          "id": "REPLACE_ME",
+          "name": "Slack Bot (demo)"
+        }
+      }
+    },
+    {
+      "id": "6346353f-1e18-44a2-a75f-c020929c46c3",
+      "name": "Build Log Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// One fixed row shape for every outcome: technical-invalid / duplicate / AI-invalid / qualified / fallback.\nconst j = $json;\nreturn [{ json: {\n  received_at: j.received_at || new Date().toISOString(),\n  status: j.status || 'unknown',\n  qualification_status: j.qualification_status || '',\n  email: j.email || '',\n  phone: j.phone || '',\n  name: j.name || '',\n  company: j.company || '',\n  source: j.source || '',\n  score: j.score ?? '',\n  class: j.lead_class || '',\n  budget_signal: j.budget_signal || '',\n  urgency: j.urgency || '',\n  next_action: j.next_action || '',\n  hubspot_id: j.hubspot_id || '',\n  ai_status: j.ai_status || '',\n  crm_status: j.crm_status || '',\n  consent: j.consent === true,\n  missing_information: (j.missing_information || []).join('; '),\n  qualification_reason: j.qualification_reason || '',\n  error: [\n    (j.errors || []).join(','),\n    j.ai_error,\n    j.crm_error,\n    j.duplicate_of && ('dup_of:' + j.duplicate_of),\n    j.duplicate_match && ('dup_match:' + j.duplicate_match)\n  ].filter(Boolean).join(' | '),\n  idempotency_key: j.idempotency_key || ''\n}}];"
+      }
+    },
+    {
+      "id": "6ed9d717-6c00-4ae7-8c78-2961b1595e47",
+      "name": "Sheets: Log Lead",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2860,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "PASTE_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets (demo)"
+        }
+      }
+    },
+    {
+      "id": "f7652866-e455-42b8-945f-d9b1f84be25e",
+      "name": "IF: CRM Failed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3080,
+        100
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "2cf82aff-88b1-44dd-a5bc-0474de9bae39",
+              "leftValue": "={{ $json.crm_status }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "rightValue": "failed"
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "281dfa91-4259-4a33-9d79-df1565234be7",
+      "name": "Stop: Raise CRM Error",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        3300,
+        0
+      ],
+      "parameters": {
+        "errorMessage": "=HubSpot upsert failed for {{ $json.email }} ({{ $json.idempotency_key }}). Lead is logged in Sheets. Error: {{ $json.error }}"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook: New Lead": {
+      "main": [
+        [
+          {
+            "node": "Respond: 202 Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Clean": {
+      "main": [
+        [
+          {
+            "node": "IF: Valid Lead?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Valid Lead?": {
+      "main": [
+        [
+          {
+            "node": "Sheets: Find Previous Leads",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Log Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheets: Find Previous Leads": {
+      "main": [
+        [
+          {
+            "node": "Check Duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Duplicate": {
+      "main": [
+        [
+          {
+            "node": "IF: Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "Build Log Row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build AI Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build AI Request": {
+      "main": [
+        [
+          {
+            "node": "OpenAI: Qualify Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI: Qualify Lead": {
+      "main": [
+        [
+          {
+            "node": "Parse AI & Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI & Score": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Upsert Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Upsert Contact": {
+      "main": [
+        [
+          {
+            "node": "Merge CRM Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge CRM Result": {
+      "main": [
+        [
+          {
+            "node": "IF: Sales Notification?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Log Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Log Row": {
+      "main": [
+        [
+          {
+            "node": "Sheets: Log Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheets: Log Lead": {
+      "main": [
+        [
+          {
+            "node": "IF: CRM Failed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: CRM Failed?": {
+      "main": [
+        [
+          {
+            "node": "Stop: Raise CRM Error",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "IF: Sales Notification?": {
+      "main": [
+        [
+          {
+            "node": "Slack: Notify Sales",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Respond: 202 Accepted": {
+      "main": [
+        [
+          {
+            "node": "Validate & Clean",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  }
+}

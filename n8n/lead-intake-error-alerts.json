@@ -1,0 +1,101 @@
+{
+  "name": "Lead Intake — Error Alerts — Portfolio v2",
+  "nodes": [
+    {
+      "id": "d8fc0081-0dcd-46c8-8db9-80aa87a53897",
+      "name": "README",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        -300
+      ],
+      "parameters": {
+        "width": 460,
+        "height": 260,
+        "color": 3,
+        "content": "## Lead Intake — Error Alerts — Portfolio v2\nSet this workflow as **Settings → Error workflow** in the main portfolio workflow.\nUsed for workflow-level failures that are not intentionally handled by fallback logic.\n\n**Credentials:** `Slack Bot (demo)` — Slack API.\n**Replace:** `#automation-alerts`.\nThe alert includes workflow, last executed node, error text, execution ID and execution URL when n8n supplies them."
+      }
+    },
+    {
+      "id": "64eff87c-9c20-4130-8c08-c53a3db2b377",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "049d2ebc-f33a-4b16-9147-a46312cfb600",
+      "name": "Format Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Error Trigger payload → concise Slack alert.\nconst e = $json;\nconst wf = e.workflow?.name || 'unknown workflow';\nconst node = e.execution?.lastNodeExecuted || e.trigger?.node?.name || 'unknown node';\nconst msg = e.execution?.error?.message || e.trigger?.error?.message || 'no message';\nconst id = e.execution?.id || '';\nconst url = e.execution?.url || '';\nconst mode = e.execution?.mode || '';\n\nconst text = [\n  `:rotating_light: *n8n workflow error*`,\n  `Workflow: _${wf}_`,\n  `Node: ${node}`,\n  `Error: ${String(msg).slice(0, 500)}`,\n  mode ? `Mode: ${mode}` : '',\n  id ? `Execution: ${id}` : 'Trigger-level error (no execution)',\n  url ? `Open: ${url}` : ''\n].filter(Boolean).join('\\n');\n\nreturn [{ json: { text } }];"
+      }
+    },
+    {
+      "id": "0f87a042-3a2d-4e41-ab97-49f873a59929",
+      "name": "Slack: Alert Channel",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "#automation-alerts",
+          "mode": "name"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "credentials": {
+        "slackApi": {
+          "id": "REPLACE_ME",
+          "name": "Slack Bot (demo)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Alert": {
+      "main": [
+        [
+          {
+            "node": "Slack: Alert Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,3 @@
+# Copy to .dev.vars for `npm run dev`. Never commit .dev.vars.
+# Must match the "Header Auth" credential (X-API-Key) on the n8n Webhook node.
+N8N_WEBHOOK_KEY=replace-with-a-long-random-string

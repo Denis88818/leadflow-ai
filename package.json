@@ -1,0 +1,19 @@
+{
+  "name": "leadflow-ai",
+  "version": "2.5.0",
+  "private": true,
+  "description": "AI lead qualification: landing page + Cloudflare Worker API + n8n (OpenAI, HubSpot, Slack, Google Sheets).",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
